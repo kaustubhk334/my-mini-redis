@@ -106,6 +106,7 @@ impl Frame {
     pub fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
         match get_u8(src)? {
             b'+' => {
+                println!("in +");
                 // Read the line and convert it to `Vec<u8>`
                 let line = get_line(src)?.to_vec();
 
@@ -115,6 +116,7 @@ impl Frame {
                 Ok(Frame::Simple(string))
             }
             b'-' => {
+                println!("in -");
                 // Read the line and convert it to `Vec<u8>`
                 let line = get_line(src)?.to_vec();
 
@@ -124,10 +126,12 @@ impl Frame {
                 Ok(Frame::Error(string))
             }
             b':' => {
+                println!("in :");
                 let len = get_decimal(src)?;
                 Ok(Frame::Integer(len))
             }
             b'$' => {
+                println!("in $");
                 if b'-' == peek_u8(src)? {
                     let line = get_line(src)?;
 
@@ -154,6 +158,7 @@ impl Frame {
                 }
             }
             b'*' => {
+                println!("*");
                 let len = get_decimal(src)?.try_into()?;
                 let mut out = Vec::with_capacity(len);
 
