@@ -134,7 +134,7 @@ impl Subscribe {
                 Some((channel_name, msg)) = subscriptions.next() => {
                     dst.write_frame(&make_message_frame(channel_name, msg)).await?;
                 }
-                res = dst.read_frame() => {
+                res = dst.my_parse_frame() => {
                     let frame = match res? {
                         Some(frame) => frame,
                         // This happens if the remote client has disconnected.

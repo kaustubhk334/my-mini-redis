@@ -337,7 +337,7 @@ impl Client {
     ///
     /// If an `Error` frame is received, it is converted to `Err`.
     async fn read_response(&mut self) -> crate::Result<Frame> {
-        let response = self.connection.read_frame().await?;
+        let response = self.connection.my_parse_frame().await?;
 
         debug!(?response);
 
@@ -368,7 +368,7 @@ impl Subscriber {
     ///
     /// `None` indicates the subscription has been terminated.
     pub async fn next_message(&mut self) -> crate::Result<Option<Message>> {
-        match self.client.connection.read_frame().await? {
+        match self.client.connection.my_parse_frame().await? {
             Some(mframe) => {
                 debug!(?mframe);
 
