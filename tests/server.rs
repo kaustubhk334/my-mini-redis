@@ -28,15 +28,19 @@ async fn key_value_get_set() {
     assert_eq!(b"$-1\r\n", &response);
 
     // Set a key
-    stream
-        .write_all(b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n")
-        .await
-        .unwrap();
+    for i in 1..100 {
+        println!("looping... {}", i);
+        stream.write_all(b"*3\r\n$3\r").await.unwrap();
+        stream
+            .write_all(b"\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n")
+            .await
+            .unwrap();
 
-    // Read OK
-    let mut response = [0; 5];
-    stream.read_exact(&mut response).await.unwrap();
-    assert_eq!(b"+OK\r\n", &response);
+        // Read OK
+        let mut response = [0; 5];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(b"+OK\r\n", &response);
+    }
 
     // Get the key, data is present
     stream
@@ -54,6 +58,44 @@ async fn key_value_get_set() {
 
     // Receive `None`
     assert_eq!(0, stream.read(&mut response).await.unwrap());
+}
+
+#[tokio::test]
+async fn custom() {
+    let addr = start_server().await;
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    for _ in 1..5 {
+        stream.write_all(b"*3\r\n$3\r\nSE").await.unwrap();
+        stream.write_all(b"T\r").await.unwrap();
+        stream.write_all(b"\n$5\r\nhel").await.unwrap();
+        // let mut s = format!("lo{}\r\n$5\r", 1.to_string());
+        stream.write_all(b"lo\r\n$5\r").await.unwrap();
+        stream.write_all(b"\nworld\r\n").await.unwrap();
+
+        // Read OK
+        let mut response = [0; 5];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(b"+OK\r\n", &response);
+        println!("passed");
+    }
+
+    // // Get the key, data is present
+    // stream
+    //     .write_all(b"*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n")
+    //     .await
+    //     .unwrap();
+
+    // Shutdown the write half
+    stream.shutdown().await.unwrap();
+
+    // Read "world" response
+    // let mut response = [0; 11];
+    // stream.read_exact(&mut response).await.unwrap();
+    // assert_eq!(b"$5\r\nworld\r\n", &response);
+
+    // // Receive `None`
+    // assert_eq!(0, stream.read(&mut response).await.unwrap());
 }
 
 /// Similar to the basic key-value test, however, this time timeouts will be
