@@ -34,6 +34,88 @@ pub struct Connection {
 }
 
 #[derive(Debug)]
+pub struct Bufio {
+    bufpos: usize,
+    cur: Cursor<Vec<u8>>,
+}
+
+impl Bufio {
+    async fn get_byte<'fut>(&mut self, connection: &'fut mut Connection) -> Result<u8, MyError> {
+        if self.bufpos >= self.cur.position() as usize {
+            // read more
+            // first read into bytes mut
+            let buffer = &mut connection.buffer;
+            let sz = connection.stream.read_buf(buffer).await?;
+
+            if sz <= 0 {
+                println!("Read 0 bytes");
+                return Err(MyError::Incomplete);
+            }
+            self.cur.write(&buffer[self.bufpos..]).await?;
+        }
+
+        self.bufpos += 1;
+        Ok(self.cur.get_ref()[self.bufpos - 1])
+    }
+    // TODO peek byte may need fixing
+    async fn peek_byte<'a>(&mut self, connection: &'a mut Connection) -> Result<u8, MyError> {
+        if self.bufpos >= self.cur.position() as usize {
+            // read more
+            // first read into bytes mut
+            let buffer = &mut connection.buffer;
+            let sz = connection.stream.read_buf(buffer).await?;
+
+            if sz <= 0 {
+                println!("Read 0 bytes");
+                return Err(MyError::Incomplete);
+            }
+            self.cur.write(&buffer[self.bufpos..]).await?;
+        }
+        Ok(self.cur.get_ref()[self.bufpos])
+    }
+
+    fn get_slice(&mut self, start: usize, end: usize) -> &[u8] {
+        &self.cur.get_ref()[start..end]
+    }
+
+    fn remaining(&mut self) -> usize {
+        self.cur.position() as usize - self.bufpos
+    }
+
+    fn get_line<'buf>(
+        &'buf mut self,
+        connection: &'buf mut Connection,
+    ) -> impl Future<Output = Result<&'buf [u8], MyError>> {
+        async move {
+            let start = self.bufpos;
+            let mut curr_char = 0;
+            while curr_char != b'\n' {
+                curr_char = self.get_byte(connection).await?;
+            }
+            Ok(self.get_slice(start, self.bufpos - 2))
+        }
+    }
+
+    // fn my_get_line<'buf>(
+    //     &'buf mut self,
+    //     cur: &'buf mut Cursor<Vec<u8>>,
+    // ) -> impl Future<Output = Result<&'buf [u8], MyError>> {
+    //     async move {
+    //         let start = cur.position() as usize;
+    //         let mut curr_char = 0;
+    //         let buffer = &mut [0; 1][..];
+    //         while curr_char != b'\n' {
+    //             // currently panics, can change as needed
+    //             curr_char = self.read_byte(cur, buffer).await?[0];
+    //         }
+    //         let end_pos = (cur.position() - 2) as usize;
+
+    //         return Ok(&cur.get_ref()[start..end_pos]);
+    //     }
+    // }
+}
+
+#[derive(Debug)]
 pub enum MyError {
     /// Not enough data is available to parse a message
     Incomplete,
@@ -135,137 +217,138 @@ impl Connection {
         }
     }
 
-    fn my_get_u8(&mut self, src: &mut Cursor<Vec<u8>>) -> Result<u8, MyError> {
-        if !src.has_remaining() {
-            return Err(MyError::Incomplete);
-        }
-        Ok(src.get_u8())
-    }
+    // fn my_get_u8(&mut self, src: &mut Cursor<Vec<u8>>) -> Result<u8, MyError> {
+    //     if !src.has_remaining() {
+    //         return Err(MyError::Incomplete);
+    //     }
+    //     Ok(src.get_u8())
+    // }
 
-    fn read_byte<'cur>(
-        &'cur mut self,
-        cur: &'cur mut Cursor<Vec<u8>>,
-        buffer: &'cur mut [u8],
-    ) -> impl Future<Output = Result<&mut [u8], MyError>> {
-        async move {
-            println!("cursor ref: {:?}", cur.get_ref());
-            println!("buffer: {:?}", self.buffer[..].to_vec());
-            // nothing remaining
-            if cur.remaining() == 0 {
-                // read more
-                println!("reading more");
-                // println!("len before: {}", self.buffer.len());
-                // println!("cur len before: {}", cur.get_ref().len());
-                let sz = self.stream.read_buf(&mut self.buffer).await?;
-                println!("read size: {}", sz);
-                // println!("len after: {}", self.buffer.len());
-                println!("cursor position before: {}", cur.position());
-                let before = cur.position();
-                cur.write(&self.buffer[(before as usize)..]).await?;
-                cur.set_position(before);
-                println!("cursor position after: {}", cur.position());
-                println!("cur len after {}", cur.get_ref().len());
-                println!("buffer len after {}", self.buffer[..].to_vec().len());
+    // fn read_byte<'cur>(
+    //     &'cur mut self,
+    //     cur: &'cur mut Cursor<Vec<u8>>,
+    //     buffer: &'cur mut [u8],
+    // ) -> impl Future<Output = Result<&mut [u8], MyError>> {
+    //     async move {
+    //         println!("cursor ref: {:?}", cur.get_ref());
+    //         println!("buffer: {:?}", self.buffer[..].to_vec());
+    //         // nothing remaining
+    //         if cur.remaining() == 0 {
+    //             // read more
+    //             println!("reading more");
+    //             // println!("len before: {}", self.buffer.len());
+    //             // println!("cur len before: {}", cur.get_ref().len());
+    //             let sz = self.stream.read_buf(&mut self.buffer).await?;
+    //             println!("read size: {}", sz);
+    //             // println!("len after: {}", self.buffer.len());
+    //             println!("cursor position before: {}", cur.position());
+    //             let before = cur.position();
+    //             cur.write(&self.buffer[(before as usize)..]).await?;
+    //             cur.set_position(before);
+    //             println!("cursor position after: {}", cur.position());
+    //             println!("cur len after {}", cur.get_ref().len());
+    //             println!("buffer len after {}", self.buffer[..].to_vec().len());
 
-                println!("cursor after: {:?}", cur.get_ref());
-                println!("buffer after: {:?}", self.buffer[..].to_vec());
-                // println!("wrote to cursor");
-                if sz <= 0 {
-                    println!("Error");
-                    return Err(MyError::Incomplete);
-                }
-            }
-            println!("reading exact");
-            cur.read_exact(buffer).await?;
-            println!("done reading");
-            println!("value read: {}", buffer[0] as char);
-            return Ok(buffer);
-        }
-    }
+    //             println!("cursor after: {:?}", cur.get_ref());
+    //             println!("buffer after: {:?}", self.buffer[..].to_vec());
+    //             // println!("wrote to cursor");
+    //             if sz <= 0 {
+    //                 println!("Error");
+    //                 return Err(MyError::Incomplete);
+    //             }
+    //         }
+    //         println!("reading exact");
+    //         cur.read_exact(buffer).await?;
+    //         println!("done reading");
+    //         println!("value read: {}", buffer[0] as char);
+    //         return Ok(buffer);
+    //     }
+    // }
 
-    fn my_get_line<'buf>(
-        &'buf mut self,
-        cur: &'buf mut Cursor<Vec<u8>>,
-    ) -> impl Future<Output = Result<&'buf [u8], MyError>> {
-        async move {
-            let start = cur.position() as usize;
-            let mut curr_char = 0;
-            let buffer = &mut [0; 1][..];
-            while curr_char != b'\n' {
-                // currently panics, can change as needed
-                curr_char = self.read_byte(cur, buffer).await?[0];
-            }
-            let end_pos = (cur.position() - 2) as usize;
+    // fn my_get_line<'buf>(
+    //     &'buf mut self,
+    //     cur: &'buf mut Cursor<Vec<u8>>,
+    // ) -> impl Future<Output = Result<&'buf [u8], MyError>> {
+    //     async move {
+    //         let start = cur.position() as usize;
+    //         let mut curr_char = 0;
+    //         let buffer = &mut [0; 1][..];
+    //         while curr_char != b'\n' {
+    //             // currently panics, can change as needed
+    //             curr_char = self.read_byte(cur, buffer).await?[0];
+    //         }
+    //         let end_pos = (cur.position() - 2) as usize;
 
-            return Ok(&cur.get_ref()[start..end_pos]);
-        }
-    }
+    //         return Ok(&cur.get_ref()[start..end_pos]);
+    //     }
+    // }
 
-    fn my_peek_u8(&mut self, src: &mut Cursor<Vec<u8>>) -> Result<u8, MyError> {
-        if !src.has_remaining() {
-            return Err(MyError::Incomplete);
-        }
-        Ok(src.chunk()[0])
-    }
+    // fn my_peek_u8(&mut self, src: &mut Cursor<Vec<u8>>) -> Result<u8, MyError> {
+    //     if !src.has_remaining() {
+    //         return Err(MyError::Incomplete);
+    //     }
+    //     Ok(src.chunk()[0])
+    // }
 
-    fn my_skip(&mut self, src: &mut Cursor<Vec<u8>>, n: usize) -> Result<(), MyError> {
-        if src.remaining() < n {
-            return Err(MyError::Incomplete);
-        }
-        src.advance(n);
-        Ok(())
-    }
+    // fn my_skip(&mut self, src: &mut Cursor<Vec<u8>>, n: usize) -> Result<(), MyError> {
+    //     if src.remaining() < n {
+    //         return Err(MyError::Incomplete);
+    //     }
+    //     src.advance(n);
+    //     Ok(())
+    // }
 
     pub fn my_parse<'fut>(
         &'fut mut self,
-        buf: &'fut mut Cursor<Vec<u8>>,
+        buf: &'fut mut Bufio,
     ) -> BoxFuture<'fut, Result<Frame, MyError>> {
         Box::pin(async move {
-            match self.my_get_u8(buf)? {
+            match buf.get_byte(self).await? {
                 b'+' => {
-                    let line = self.my_get_line(buf).await?.to_vec();
+                    let line = buf.get_line(self).await?.to_vec();
                     let string = String::from_utf8(line)?;
                     return Ok(Frame::Simple(string));
                 }
                 b'-' => {
-                    let line = self.my_get_line(buf).await?.to_vec();
+                    let line = buf.get_line(self).await?.to_vec();
                     let string = String::from_utf8(line)?;
                     return Ok(Frame::Simple(string));
                 }
                 b':' => {
                     use atoi::atoi;
-                    let line = self.my_get_line(buf).await?;
+                    let line = buf.get_line(self).await?;
                     let len =
                         atoi::<u64>(line).ok_or_else(|| "protocol error; invalid frame format")?;
                     return Ok(Frame::Integer(len));
                 }
                 b'$' => {
-                    if b'-' == self.my_peek_u8(buf)? {
-                        let line = self.my_get_line(buf).await?;
+                    if b'-' == buf.peek_byte(self).await? {
+                        let line = buf.get_line(self).await?;
                         if line != b"-1" {
                             return Err("protcol error; invalid frame format".into());
                         }
                         return Ok(Frame::Null);
                     } else {
                         use atoi::atoi;
-                        let line = self.my_get_line(buf).await?;
+                        let line = buf.get_line(self).await?;
                         let len = atoi::<u64>(line)
-                            .ok_or_else(|| "protcol error; invalid frame format")?
-                            .try_into()?;
-                        let n = len + 2;
+                            .ok_or_else(|| "protcol error; invalid frame format")?;
+                        // .try_into()?;
+                        let n = (len + 2) as usize;
                         if buf.remaining() < n {
                             return Err(MyError::Incomplete);
                         }
-                        let chunk = &buf.chunk()[..len];
+                        let chunk = buf.get_slice(buf.bufpos, buf.bufpos + len as usize);
                         // let string = String::from_utf8(chunk.to_vec())?;
                         let data = Bytes::copy_from_slice(chunk);
-                        self.my_skip(buf, n)?;
+                        // self.my_skip(buf, n)?;
+                        buf.bufpos += n;
                         return Ok(Frame::Bulk(data));
                     }
                 }
                 b'*' => {
                     use atoi::atoi;
-                    let line = self.my_get_line(buf).await?;
+                    let line = buf.get_line(self).await?;
                     // let string = String::from_utf8(line.to_vec())?;
                     let len = atoi::<u64>(line)
                         .ok_or_else(|| "protcol error; invalid frame format")?
@@ -296,9 +379,16 @@ impl Connection {
             }
         }
         let v = self.buffer[..].to_vec();
-        let cur = &mut Cursor::new(v);
-        let frame = self.my_parse(cur).await?;
-        let len = cur.position() as usize;
+        let l = v.len();
+        let bufio = &mut Bufio {
+            bufpos: 0,
+            cur: Cursor::new(v),
+        };
+
+        // let cur = &mut Cursor::new(v);
+        bufio.cur.set_position(l as u64);
+        let frame = self.my_parse(bufio).await?;
+        let len = bufio.bufpos;
 
         self.buffer.advance(len);
         Ok(Some(frame))

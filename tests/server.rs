@@ -28,13 +28,16 @@ async fn key_value_get_set() {
     assert_eq!(b"$-1\r\n", &response);
 
     // Set a key
-    for i in 1..100 {
+    for i in 1..10000 {
         println!("looping... {}", i);
-        stream.write_all(b"*3\r\n$3\r").await.unwrap();
         stream
-            .write_all(b"\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n")
+            .write_all(b"*3\r\n$3\r\nSET\r\n$6\r\nhelloo\r\n$5\r\nworld\r\n")
             .await
             .unwrap();
+        // stream
+        //     .write_all(b"\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n")
+        //     .await
+        //     .unwrap();
 
         // Read OK
         let mut response = [0; 5];
@@ -44,7 +47,7 @@ async fn key_value_get_set() {
 
     // Get the key, data is present
     stream
-        .write_all(b"*2\r\n$3\r\nGET\r\n$5\r\nhello\r\n")
+        .write_all(b"*2\r\n$3\r\nGET\r\n$6\r\nhelloo\r\n")
         .await
         .unwrap();
 
