@@ -1,4 +1,4 @@
-use crate::frame::{self, Frame};
+use crate::frame::Frame;
 
 use bytes::{Buf, Bytes, BytesMut};
 use futures::future::{BoxFuture, Future};
@@ -33,55 +33,85 @@ pub struct Connection {
     buffer: BytesMut,
 }
 
+/**
+ * A FIFO-style buffer with a read end and write end.
+ * The read end is managed by `bufpos`, through which a frame is read and parsed.
+ * The write end is managed by a `cur`, a Cursor, which simply appends bytes to its
+ * underlying Vec<u8> as they are received by the client.
+ * */
 #[derive(Debug)]
 pub struct Bufio {
     bufpos: usize,
     cur: Cursor<Vec<u8>>,
 }
 
+/**
+ * Function implementations for Bufio that handle the reading, writing, and parsing of frames.
+ * */
 impl Bufio {
-    async fn get_byte<'fut>(&mut self, connection: &'fut mut Connection) -> Result<u8, MyError> {
-        if self.bufpos >= self.cur.position() as usize {
-            // read more
-            // first read into bytes mut
-            let buffer = &mut connection.buffer;
-            let sz = connection.stream.read_buf(buffer).await?;
+    /**
+     * Reads more bytes from the stream and writes them to the buffer, which
+     * are used later for parsing frames.
+     * */
+    async fn read_more(&mut self, connection: &mut Connection) -> Result<usize, MyError> {
+        // Read bytes into the buffer of the Connection
+        let buffer = &mut connection.buffer;
+        let sz = connection.stream.read_buf(buffer).await?;
 
-            if sz <= 0 {
-                println!("Read 0 bytes");
-                return Err(MyError::Incomplete);
-            }
-            self.cur.write(&buffer[self.bufpos..]).await?;
+        // No bytes are read
+        if sz < 1 {
+            return Err(MyError::Incomplete);
         }
+        // Write the bytes into Bufio's underlyikng Cursor
+        self.cur.write(&buffer[self.bufpos..]).await?;
+        Ok(sz)
+    }
 
+    /**
+     * Attemtps to read a byte from Bufio at the index of `bufpos`. If no bytes are
+     * available to read, more bytes are read into the cursor.
+     * */
+    async fn get_byte<'fut>(&mut self, connection: &'fut mut Connection) -> Result<u8, MyError> {
+        // Read more bytes if the read end is at the same position as the write end
+        // of the buffer
+        if self.bufpos >= self.cur.position() as usize {
+            let _read_sz = self.read_more(connection).await?;
+        }
+        // Increment the read end and return the byte
         self.bufpos += 1;
         Ok(self.cur.get_ref()[self.bufpos - 1])
     }
-    // TODO peek byte may need fixing
-    async fn peek_byte<'a>(&mut self, connection: &'a mut Connection) -> Result<u8, MyError> {
-        if self.bufpos >= self.cur.position() as usize {
-            // read more
-            // first read into bytes mut
-            let buffer = &mut connection.buffer;
-            let sz = connection.stream.read_buf(buffer).await?;
 
-            if sz <= 0 {
-                println!("Read 0 bytes");
-                return Err(MyError::Incomplete);
-            }
-            self.cur.write(&buffer[self.bufpos..]).await?;
+    /**
+     * Attempts to read a byte from Bufio at the index of `bufpos` without "consuming" it.
+     * Keeps the read end at the same position and just returns the byte. If no bytes are
+     * available to read, more bytes are read into the cursor.
+     * */
+    async fn peek_byte<'a>(&mut self, connection: &'a mut Connection) -> Result<u8, MyError> {
+        // Read more bytes if the read end is at the same position as the write end
+        // of the buffer
+        if self.bufpos >= self.cur.position() as usize {
+            let _read_sz = self.read_more(connection).await?;
         }
+        // return the read byte
         Ok(self.cur.get_ref()[self.bufpos])
     }
 
+    /**
+     * Returns a slice of the buffer starting at `start` and including all bytes up to but
+     * not including `end`.
+     * */
     fn get_slice(&mut self, start: usize, end: usize) -> &[u8] {
         &self.cur.get_ref()[start..end]
     }
 
-    fn remaining(&mut self) -> usize {
-        self.cur.position() as usize - self.bufpos
-    }
-
+    /**
+     * Returns a chunk of bytes representing a frame (such that a new line character is reached).
+     * Asynchronously calls get_byte one at a time, mainting its position in the buffer, until a
+     * complete frame is reached. This approach should theoretically save time compared to the
+     * approach of reading a complete frame at a time, which also assumes that complete frames
+     * exist in the buffer.
+     * */
     fn get_line<'buf>(
         &'buf mut self,
         connection: &'buf mut Connection,
@@ -89,30 +119,14 @@ impl Bufio {
         async move {
             let start = self.bufpos;
             let mut curr_char = 0;
+            // loop through the buffer until a new line is reached, representing the end of a frame.
             while curr_char != b'\n' {
                 curr_char = self.get_byte(connection).await?;
             }
+            // return all the bytes until the carriage return of the frame.
             Ok(self.get_slice(start, self.bufpos - 2))
         }
     }
-
-    // fn my_get_line<'buf>(
-    //     &'buf mut self,
-    //     cur: &'buf mut Cursor<Vec<u8>>,
-    // ) -> impl Future<Output = Result<&'buf [u8], MyError>> {
-    //     async move {
-    //         let start = cur.position() as usize;
-    //         let mut curr_char = 0;
-    //         let buffer = &mut [0; 1][..];
-    //         while curr_char != b'\n' {
-    //             // currently panics, can change as needed
-    //             curr_char = self.read_byte(cur, buffer).await?[0];
-    //         }
-    //         let end_pos = (cur.position() - 2) as usize;
-
-    //         return Ok(&cur.get_ref()[start..end_pos]);
-    //     }
-    // }
 }
 
 #[derive(Debug)]
@@ -179,142 +193,31 @@ impl Connection {
         }
     }
 
-    /// Read a single `Frame` value from the underlying stream.
-    ///
-    /// The function waits until it has retrieved enough data to parse a frame.
-    /// Any data remaining in the read buffer after the frame has been parsed is
-    /// kept there for the next call to `read_frame`.
-    ///
-    /// # Returns
-    ///
-    /// On success, the received frame is returned. If the `TcpStream`
-    /// is closed in a way that doesn't break a frame in half, it returns
-    /// `None`. Otherwise, an error is returned.
-    pub async fn read_frame(&mut self) -> crate::Result<Option<Frame>> {
-        loop {
-            // Attempt to parse a frame from the buffered data. If enough data
-            // has been buffered, the frame is returned.
-            if let Some(frame) = self.parse_frame()? {
-                return Ok(Some(frame));
-            }
-
-            // There is not enough buffered data to read a frame. Attempt to
-            // read more data from the socket.
-            //
-            // On success, the number of bytes is returned. `0` indicates "end
-            // of stream".
-            if 0 == self.stream.read_buf(&mut self.buffer).await? {
-                // The remote closed the connection. For this to be a clean
-                // shutdown, there should be no data in the read buffer. If
-                // there is, this means that the peer closed the socket while
-                // sending a frame.
-                if self.buffer.is_empty() {
-                    return Ok(None);
-                } else {
-                    return Err("connection reset by peer".into());
-                }
-            }
-        }
-    }
-
-    // fn my_get_u8(&mut self, src: &mut Cursor<Vec<u8>>) -> Result<u8, MyError> {
-    //     if !src.has_remaining() {
-    //         return Err(MyError::Incomplete);
-    //     }
-    //     Ok(src.get_u8())
-    // }
-
-    // fn read_byte<'cur>(
-    //     &'cur mut self,
-    //     cur: &'cur mut Cursor<Vec<u8>>,
-    //     buffer: &'cur mut [u8],
-    // ) -> impl Future<Output = Result<&mut [u8], MyError>> {
-    //     async move {
-    //         println!("cursor ref: {:?}", cur.get_ref());
-    //         println!("buffer: {:?}", self.buffer[..].to_vec());
-    //         // nothing remaining
-    //         if cur.remaining() == 0 {
-    //             // read more
-    //             println!("reading more");
-    //             // println!("len before: {}", self.buffer.len());
-    //             // println!("cur len before: {}", cur.get_ref().len());
-    //             let sz = self.stream.read_buf(&mut self.buffer).await?;
-    //             println!("read size: {}", sz);
-    //             // println!("len after: {}", self.buffer.len());
-    //             println!("cursor position before: {}", cur.position());
-    //             let before = cur.position();
-    //             cur.write(&self.buffer[(before as usize)..]).await?;
-    //             cur.set_position(before);
-    //             println!("cursor position after: {}", cur.position());
-    //             println!("cur len after {}", cur.get_ref().len());
-    //             println!("buffer len after {}", self.buffer[..].to_vec().len());
-
-    //             println!("cursor after: {:?}", cur.get_ref());
-    //             println!("buffer after: {:?}", self.buffer[..].to_vec());
-    //             // println!("wrote to cursor");
-    //             if sz <= 0 {
-    //                 println!("Error");
-    //                 return Err(MyError::Incomplete);
-    //             }
-    //         }
-    //         println!("reading exact");
-    //         cur.read_exact(buffer).await?;
-    //         println!("done reading");
-    //         println!("value read: {}", buffer[0] as char);
-    //         return Ok(buffer);
-    //     }
-    // }
-
-    // fn my_get_line<'buf>(
-    //     &'buf mut self,
-    //     cur: &'buf mut Cursor<Vec<u8>>,
-    // ) -> impl Future<Output = Result<&'buf [u8], MyError>> {
-    //     async move {
-    //         let start = cur.position() as usize;
-    //         let mut curr_char = 0;
-    //         let buffer = &mut [0; 1][..];
-    //         while curr_char != b'\n' {
-    //             // currently panics, can change as needed
-    //             curr_char = self.read_byte(cur, buffer).await?[0];
-    //         }
-    //         let end_pos = (cur.position() - 2) as usize;
-
-    //         return Ok(&cur.get_ref()[start..end_pos]);
-    //     }
-    // }
-
-    // fn my_peek_u8(&mut self, src: &mut Cursor<Vec<u8>>) -> Result<u8, MyError> {
-    //     if !src.has_remaining() {
-    //         return Err(MyError::Incomplete);
-    //     }
-    //     Ok(src.chunk()[0])
-    // }
-
-    // fn my_skip(&mut self, src: &mut Cursor<Vec<u8>>, n: usize) -> Result<(), MyError> {
-    //     if src.remaining() < n {
-    //         return Err(MyError::Incomplete);
-    //     }
-    //     src.advance(n);
-    //     Ok(())
-    // }
-
-    pub fn my_parse<'fut>(
+    /**
+     * Parses the request sent by the client and returns its corresponding frame.
+     **/
+    pub fn parse_line<'fut>(
         &'fut mut self,
         buf: &'fut mut Bufio,
     ) -> BoxFuture<'fut, Result<Frame, MyError>> {
         Box::pin(async move {
+            // Determine the type of request
             match buf.get_byte(self).await? {
                 b'+' => {
+                    // Simple String, get line and return as a Frame.
                     let line = buf.get_line(self).await?.to_vec();
                     let string = String::from_utf8(line)?;
                     return Ok(Frame::Simple(string));
                 }
                 b'-' => {
+                    // Error, get line and return as a Frame.
                     let line = buf.get_line(self).await?.to_vec();
                     let string = String::from_utf8(line)?;
                     return Ok(Frame::Simple(string));
                 }
                 b':' => {
+                    // Integer, get line, convert to an Integer, and
+                    // return as a Frame.
                     use atoi::atoi;
                     let line = buf.get_line(self).await?;
                     let len =
@@ -322,6 +225,8 @@ impl Connection {
                     return Ok(Frame::Integer(len));
                 }
                 b'$' => {
+                    // Bulk String
+                    // First check if the first byte is an error
                     if b'-' == buf.peek_byte(self).await? {
                         let line = buf.get_line(self).await?;
                         if line != b"-1" {
@@ -329,36 +234,34 @@ impl Connection {
                         }
                         return Ok(Frame::Null);
                     } else {
-                        use atoi::atoi;
-                        let line = buf.get_line(self).await?;
-                        let len = atoi::<u64>(line)
-                            .ok_or_else(|| "protcol error; invalid frame format")?;
-                        // .try_into()?;
-                        let n = (len + 2) as usize;
-                        if buf.remaining() < n {
-                            return Err(MyError::Incomplete);
-                        }
-                        let chunk = buf.get_slice(buf.bufpos, buf.bufpos + len as usize);
-                        // let string = String::from_utf8(chunk.to_vec())?;
+                        // Return the line as a Bulk String Frame.
+                        buf.get_line(self).await?;
+                        let chunk = buf.get_line(self).await?;
                         let data = Bytes::copy_from_slice(chunk);
-                        // self.my_skip(buf, n)?;
-                        buf.bufpos += n;
                         return Ok(Frame::Bulk(data));
                     }
                 }
                 b'*' => {
+                    // Array
+                    // Determine the length of the array from the fist line
                     use atoi::atoi;
                     let line = buf.get_line(self).await?;
-                    // let string = String::from_utf8(line.to_vec())?;
                     let len = atoi::<u64>(line)
                         .ok_or_else(|| "protcol error; invalid frame format")?
                         .try_into()?;
                     let mut out = Vec::with_capacity(len);
+
+                    // Loop through the length of the array and recursively parse
+                    // a frame the specified number of times, storing them in a
+                    // Vector.
                     for _ in 0..len {
-                        out.push(self.my_parse(buf).await?);
+                        out.push(self.parse_line(buf).await?);
                     }
+
+                    // Return the Vector as a Frame.
                     return Ok(Frame::Array(out));
                 }
+                // Not a valid request
                 actual => {
                     Err(format!("protocol error; invalid frame type byte `{}`", actual).into())
                 }
@@ -366,7 +269,13 @@ impl Connection {
         })
     }
 
-    pub async fn my_parse_frame(&mut self) -> crate::Result<Option<Frame>> {
+    /**
+     * Parses a frame from the bytes in the stream, using an asynchronous,
+     * one pass approach, through which complete frames are not necessary, since a
+     * read end and write end is used.
+     **/
+    pub async fn parse_frame(&mut self) -> crate::Result<Option<Frame>> {
+        // Read bytes from the stream
         if 0 == self.stream.read_buf(&mut self.buffer).await? {
             // The remote closed the connection. For this to be a clean
             // shutdown, there should be no data in the read buffer. If
@@ -378,85 +287,25 @@ impl Connection {
                 return Err("connection reset by peer".into());
             }
         }
+
+        // Create a Bufio struct from the bytes read, storing the bytes as a Vector
+        // and the position at which to read byte by byte.
         let v = self.buffer[..].to_vec();
         let l = v.len();
         let bufio = &mut Bufio {
             bufpos: 0,
             cur: Cursor::new(v),
         };
-
-        // let cur = &mut Cursor::new(v);
+        // set the position at the end of the buffer to represent the write end
+        // and parse the frame.
         bufio.cur.set_position(l as u64);
-        let frame = self.my_parse(bufio).await?;
-        let len = bufio.bufpos;
+        let frame = self.parse_line(bufio).await?;
 
+        // Advance the connection's buffer by the amount of bytes read and
+        // return the frame.
+        let len = bufio.bufpos;
         self.buffer.advance(len);
         Ok(Some(frame))
-    }
-
-    /// Tries to parse a frame from the buffer. If the buffer contains enough
-    /// data, the frame is returned and the data removed from the buffer. If not
-    /// enough data has been buffered yet, `Ok(None)` is returned. If the
-    /// buffered data does not represent a valid frame, `Err` is returned.
-    fn parse_frame(&mut self) -> crate::Result<Option<Frame>> {
-        use frame::Error::Incomplete;
-
-        // Cursor is used to track the "current" location in the
-        // buffer. Cursor also implements `Buf` from the `bytes` crate
-        // which provides a number of helpful utilities for working
-        // with bytes.
-        let mut buf = Cursor::new(&self.buffer[..]);
-
-        // The first step is to check if enough data has been buffered to parse
-        // a single frame. This step is usually much faster than doing a full
-        // parse of the frame, and allows us to skip allocating data structures
-        // to hold the frame data unless we know the full frame has been
-        // received.
-        match Frame::check(&mut buf) {
-            Ok(_) => {
-                // The `check` function will have advanced the cursor until the
-                // end of the frame. Since the cursor had position set to zero
-                // before `Frame::check` was called, we obtain the length of the
-                // frame by checking the cursor position.
-                let len = buf.position() as usize;
-
-                // Reset the position to zero before passing the cursor to
-                // `Frame::parse`.
-                buf.set_position(0);
-
-                // Parse the frame from the buffer. This allocates the necessary
-                // structures to represent the frame and returns the frame
-                // value.
-                //
-                // If the encoded frame representation is invalid, an error is
-                // returned. This should terminate the **current** connection
-                // but should not impact any other connected client.
-                let frame = Frame::parse(&mut buf)?;
-
-                // Discard the parsed data from the read buffer.
-                //
-                // When `advance` is called on the read buffer, all of the data
-                // up to `len` is discarded. The details of how this works is
-                // left to `BytesMut`. This is often done by moving an internal
-                // cursor, but it may be done by reallocating and copying data.
-                self.buffer.advance(len);
-
-                // Return the parsed frame to the caller.
-                Ok(Some(frame))
-            }
-            // There is not enough data present in the read buffer to parse a
-            // single frame. We must wait for more data to be received from the
-            // socket. Reading from the socket will be done in the statement
-            // after this `match`.
-            //
-            // We do not want to return `Err` from here as this "error" is an
-            // expected runtime condition.
-            Err(Incomplete) => Ok(None),
-            // An error was encountered while parsing the frame. The connection
-            // is now in an invalid state. Returning `Err` from here will result
-            // in the connection being closed.
-            Err(e) => Err(e.into()),
-        }
     }
 
     /// Write a single `Frame` value to the underlying stream.
